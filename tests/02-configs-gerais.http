@@ -1,0 +1,64 @@
+@APISIX_ADMIN_KEY=edd1c9f034335f136f87ad84b625c8f1
+@CLIENT_API_KEY=abcdefghijk2026xyz
+@CLIENT_API_KEY_2=abcdefghijk2026xyzmno
+@LANGFUSE_AUTH=BASE64_PUBLIC_KEY:PRIVATE_KEY
+@VAULT_TOKEN=1f91d80e-0a03-49b3-b84b-f1de3d172eec
+
+###
+###
+# set_ngx_var = true -> APISIX vai permitir setar no trace o conteúdo de variáveis do Nginx (base do APISIX)
+# PASSO 1: Configurar traces do APISIX para OpenTelemetry
+# IMPORTANTE: o exporter do APISIX 3.17 sempre concatena /v1/traces ao address.
+# Use .../api/public/otel (NÃO .../api/public/otel/v1/traces), senão retornará 404.
+curl http://127.0.0.1:9180/apisix/admin/plugin_metadata/opentelemetry -H "X-API-KEY: {{APISIX_ADMIN_KEY}}" -X PUT -d '
+{
+    "trace_id_source": "random",
+    "resource": {
+      "service.name": "APISIX",
+      "deployment.environment.name": "development"
+    },
+    "collector": {
+      "address": "langfuse-web:3000/api/public/otel",
+      "request_timeout": 3,
+      "request_headers": {
+        "Authorization": "Basic {{LANGFUSE_AUTH}}"
+      }
+    },
+    "batch_span_processor": {
+      "drop_on_queue_full": false,
+      "max_queue_size": 1024,
+      "batch_timeout": 2,
+      "inactive_timeout": 1,
+      "max_export_batch_size": 16
+    },
+    "set_ngx_var": true
+}'
+
+
+###
+# PASSO 2: Criar o Consumer com a API Key do cliente.
+curl "http://127.0.0.1:9180/apisix/admin/consumers" -X PUT \
+  -H "X-API-KEY: {{APISIX_ADMIN_KEY}}" \
+  -d '{
+    "username": "consoleappchatai",
+    "plugins": {
+      "key-auth": {
+        "key": "{{CLIENT_API_KEY}}"
+      }
+    }
+  }'
+
+
+###
+# PASSO 3: Criar segundo Consumer com a API Key do cliente.
+curl "http://127.0.0.1:9180/apisix/admin/consumers" -X PUT \
+  -H "X-API-KEY: {{APISIX_ADMIN_KEY}}" \
+  -d '{
+    "username": "consoleappchatai2",
+    "plugins": {
+      "key-auth": {
+        "key": "{{CLIENT_API_KEY_2}}"
+      }
+    }
+  }'
+

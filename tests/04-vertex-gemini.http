@@ -1,0 +1,368 @@
+@APISIX_ADMIN_KEY=edd1c9f034335f136f87ad84b625c8f1
+@CLIENT_API_KEY=abcdefghijk2026xyz
+@CLIENT_API_KEY_2=abcdefghijk2026xyzmno
+@MODEL_NAME=gemini-3.1-flash-lite
+@MODEL_NAME2=gemini-3.5-flash-lite
+@ROUTE_APISIX=/google/vertex-ai
+@VERTEX_PROJECT_ID=PROJETO_ID_GOOGLE
+@VERTEX_CLIENT_EMAIL=CLIENT_EMAIL_GOOGLE
+@VERTEX_PRIVATE_KEY_ID=PRIVATE_KEY_ID_GOOGLE
+@VERTEX_PRIVATE_KEY=JSON_SERVICE_ACCOUNT_PRIVATE_KEY_GOOGLE
+
+
+###
+# additional_attributes: permite incluir variáveis do NGINX e do APISIX no trace.
+# Variáveis do APISIX: https://apisix.apache.org/docs/apisix/apisix-variable/
+# Variáveis do NGINX: https://nginx.org/en/docs/http/ngx_http_core_module.html
+#
+# GenAI semconv (gen_ai.*): o plugin opentelemetry NÃO deriva isso do JSON.
+# O ai-proxy já preenche llm_model / llm_prompt_tokens / llm_completion_tokens.
+# serverless-post-function (phase=log, priority > opentelemetry=12009) mapeia
+# llm_* + resp_body -> gen_ai.* / server.* antes do export OTLP.
+#
+# PASSO 1: Criar de rotas exigindo a API Key do cliente.
+#
+# Criando uma rota baseada em ai-proxy
+curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+  -H "X-API-KEY: {{APISIX_ADMIN_KEY}}" \
+  -d '{
+    "id": "google-ai-vertex-test",
+    "uri": "{{ROUTE_APISIX}}/chat/completions/*",
+    "methods": ["POST"],
+    "plugins": {
+      "key-auth": {},
+      "consumer-restriction": {
+          "whitelist": [
+              "consoleappchatai"
+          ]
+      },
+      "ai-prompt-guard": {
+        "deny_patterns": ["(?i)AWS", "(?i)Amazon", "(?i)Oracle"]
+      },
+      "serverless-post-function": {
+        "_meta": {
+          "priority": 12010
+        },
+        "phase": "log",
+        "functions": [
+          "return function(conf, ctx)\n  local cjson = require(\"cjson.safe\")\n  local body = cjson.decode(ctx.var.resp_body or \"\") or {}\n  local usage = body.usage or {}\n  local choice = (body.choices and body.choices[1]) or {}\n  local finish = choice.finish_reason or \"\"\n  local req_model = ctx.var.request_llm_model\n  if not req_model or req_model == \"\" then req_model = ctx.var.llm_model or \"\" end\n\n  ctx.var[\"gen_ai.operation.name\"] = \"chat\"\n  ctx.var[\"gen_ai.provider.name\"] = \"gcp.vertex_ai\"\n  ctx.var[\"gen_ai.request.model\"] = req_model\n  ctx.var[\"gen_ai.response.model\"] = body.model or ctx.var.llm_model or \"\"\n  ctx.var[\"gen_ai.response.id\"] = body.id or \"\"\n  ctx.var[\"gen_ai.response.finish_reasons\"] = finish\n  ctx.var[\"gen_ai.usage.input_tokens\"] = tostring(usage.prompt_tokens or ctx.var.llm_prompt_tokens or 0)\n  ctx.var[\"gen_ai.usage.output_tokens\"] = tostring(usage.completion_tokens or ctx.var.llm_completion_tokens or 0)\n  ctx.var[\"gen_ai.usage.cache_read.input_tokens\"] = tostring((usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens) or 0)\n  ctx.var[\"gen_ai.usage.reasoning.output_tokens\"] = tostring((usage.completion_tokens_details and usage.completion_tokens_details.reasoning_tokens) or 0)\n  ctx.var[\"server.address\"] = ctx.var.upstream_host or \"\"\n  ctx.var[\"server.port\"] = \"443\"\nend"
+        ]
+      },
+      "opentelemetry": {
+        "sampler": {
+          "name": "always_on"
+        },
+        "additional_attributes": [
+            "consumer_name",
+            "request_uri",
+            "hostname",
+            "location",
+            "upstream_scheme",
+            "upstream_host",
+            "upstream_uri",
+            "upstream_addr",
+            "server_addr",
+            "server_port",
+            "request_method",
+            "request_length",
+            "request_time",
+            "status",
+            "body_bytes_sent",
+            "request_body",
+            "resp_body",
+            "llm_model",
+            "request_llm_model",
+            "llm_prompt_tokens",
+            "llm_completion_tokens",
+            "llm_time_to_first_token",
+            "gen_ai.operation.name",
+            "gen_ai.provider.name",
+            "gen_ai.request.model",
+            "gen_ai.response.model",
+            "gen_ai.response.id",
+            "gen_ai.response.finish_reasons",
+            "gen_ai.usage.input_tokens",
+            "gen_ai.usage.output_tokens",
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.reasoning.output_tokens",
+            "server.address",
+            "server.port"
+        ]
+      },
+      "loki-logger": {
+        "endpoint_addrs": ["http://loki:3100"],
+        "endpoint_uri": "/loki/api/v1/push",
+        "tenant_id": "fake",
+        "log_labels": {
+          "job": "apisix",
+          "route": "google-ai-vertex-test",
+          "consumer": "$consumer_name"
+        },
+        "include_req_body": true,
+        "include_resp_body": true,
+        "max_req_body_bytes": 524288,
+        "max_resp_body_bytes": 524288,
+        "batch_max_size": 1,
+        "inactive_timeout": 1
+      },
+      "ai-proxy": {
+        "provider": "vertex-ai",
+        "auth": {
+          "gcp": {
+            "service_account_json": "{\"type\":\"service_account\",\"project_id\":\"{{VERTEX_PROJECT_ID}}\",\"private_key_id\":\"{{VERTEX_PRIVATE_KEY_ID}}\",\"private_key\":\"{{VERTEX_PRIVATE_KEY}}\",\"client_email\":\"{{VERTEX_CLIENT_EMAIL}}\"}"
+          },
+          "header": {
+            "Accept-Encoding": "identity"
+          }
+        },
+        "options":{
+          "model": "google/{{MODEL_NAME}}"
+        },
+        "override": {
+          "endpoint": "https://aiplatform.googleapis.com/v1/projects/{{VERTEX_PROJECT_ID}}/locations/global/endpoints/openapi/chat/completions"
+        },
+        "logging": {
+          "summaries": true,
+          "payloads": true
+        }
+      }
+    },
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "://googleapis.com": 1
+      },
+      "scheme": "https"
+    }
+  }'
+
+###
+#
+# Criando uma rota baseada em ai-proxy-multi
+curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+  -H "X-API-KEY: {{APISIX_ADMIN_KEY}}" \
+  -d '{
+    "id": "google-ai-vertex-multimodel-test",
+    "uri": "{{ROUTE_APISIX}}/chat/completions-multimodel/*",
+    "methods": ["POST"],
+    "plugins": {
+      "key-auth": {},
+      "consumer-restriction": {
+          "whitelist": [
+              "consoleappchatai"
+          ]
+      },
+      "ai-prompt-guard": {
+        "deny_patterns": ["(?i)AWS", "(?i)Amazon", "(?i)Oracle"]
+      },
+      "serverless-post-function": {
+        "_meta": {
+          "priority": 12010
+        },
+        "phase": "log",
+        "functions": [
+          "return function(conf, ctx)\n  local cjson = require(\"cjson.safe\")\n  local body = cjson.decode(ctx.var.resp_body or \"\") or {}\n  local usage = body.usage or {}\n  local choice = (body.choices and body.choices[1]) or {}\n  local finish = choice.finish_reason or \"\"\n  local req_model = ctx.var.request_llm_model\n  if not req_model or req_model == \"\" then req_model = ctx.var.llm_model or \"\" end\n\n  ctx.var[\"gen_ai.operation.name\"] = \"chat\"\n  ctx.var[\"gen_ai.provider.name\"] = \"gcp.vertex_ai\"\n  ctx.var[\"gen_ai.request.model\"] = req_model\n  ctx.var[\"gen_ai.response.model\"] = body.model or ctx.var.llm_model or \"\"\n  ctx.var[\"gen_ai.response.id\"] = body.id or \"\"\n  ctx.var[\"gen_ai.response.finish_reasons\"] = finish\n  ctx.var[\"gen_ai.usage.input_tokens\"] = tostring(usage.prompt_tokens or ctx.var.llm_prompt_tokens or 0)\n  ctx.var[\"gen_ai.usage.output_tokens\"] = tostring(usage.completion_tokens or ctx.var.llm_completion_tokens or 0)\n  ctx.var[\"gen_ai.usage.cache_read.input_tokens\"] = tostring((usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens) or 0)\n  ctx.var[\"gen_ai.usage.reasoning.output_tokens\"] = tostring((usage.completion_tokens_details and usage.completion_tokens_details.reasoning_tokens) or 0)\n  ctx.var[\"server.address\"] = ctx.var.upstream_host or \"\"\n  ctx.var[\"server.port\"] = \"443\"\nend"
+        ]
+      },
+      "opentelemetry": {
+        "sampler": {
+          "name": "always_on"
+        },
+        "additional_attributes": [
+            "consumer_name",
+            "request_uri",
+            "hostname",
+            "location",
+            "upstream_scheme",
+            "upstream_host",
+            "upstream_uri",
+            "upstream_addr",
+            "server_addr",
+            "server_port",
+            "request_method",
+            "request_length",
+            "request_time",
+            "status",
+            "body_bytes_sent",
+            "request_body",
+            "resp_body",
+            "llm_model",
+            "request_llm_model",
+            "llm_prompt_tokens",
+            "llm_completion_tokens",
+            "llm_time_to_first_token",
+            "gen_ai.operation.name",
+            "gen_ai.provider.name",
+            "gen_ai.request.model",
+            "gen_ai.response.model",
+            "gen_ai.response.id",
+            "gen_ai.response.finish_reasons",
+            "gen_ai.usage.input_tokens",
+            "gen_ai.usage.output_tokens",
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.reasoning.output_tokens",
+            "server.address",
+            "server.port"
+        ]
+      },
+      "loki-logger": {
+        "endpoint_addrs": ["http://loki:3100"],
+        "endpoint_uri": "/loki/api/v1/push",
+        "tenant_id": "fake",
+        "log_labels": {
+          "job": "apisix",
+          "route": "google-ai-vertex-multimodel-test",
+          "consumer": "$consumer_name"
+        },
+        "include_req_body": true,
+        "include_resp_body": true,
+        "max_req_body_bytes": 524288,
+        "max_resp_body_bytes": 524288,
+        "batch_max_size": 1,
+        "inactive_timeout": 1
+      },
+      "ai-proxy-multi": {
+        "instances": [
+          {
+            "name": "vertex-{{MODEL_NAME}}",
+            "provider": "vertex-ai",
+            "weight": 1,
+            "auth": {
+              "gcp": {
+                "service_account_json": "{\"type\":\"service_account\",\"project_id\":\"{{VERTEX_PROJECT_ID}}\",\"private_key_id\":\"{{VERTEX_PRIVATE_KEY_ID}}\",\"private_key\":\"{{VERTEX_PRIVATE_KEY}}\",\"client_email\":\"{{VERTEX_CLIENT_EMAIL}}\"}"
+              },
+              "header": {
+                "Accept-Encoding": "identity"
+              }
+            },
+            "options": {
+              "model": "google/{{MODEL_NAME}}"
+            },
+            "timeout": 120000,
+            "override": {
+              "endpoint": "https://aiplatform.googleapis.com/v1/projects/{{VERTEX_PROJECT_ID}}/locations/global/endpoints/openapi/chat/completions"
+            }
+          },
+          {
+            "name": "vertex-{{MODEL_NAME2}}",
+            "provider": "vertex-ai",
+            "weight": 1,
+            "auth": {
+              "gcp": {
+                "service_account_json": "{\"type\":\"service_account\",\"project_id\":\"{{VERTEX_PROJECT_ID}}\",\"private_key_id\":\"{{VERTEX_PRIVATE_KEY_ID}}\",\"private_key\":\"{{VERTEX_PRIVATE_KEY}}\",\"client_email\":\"{{VERTEX_CLIENT_EMAIL}}\"}"
+              },
+              "header": {
+                "Accept-Encoding": "identity"
+              }
+            },
+            "options": {
+              "model": "google/{{MODEL_NAME2}}"
+            },
+            "timeout": 120000,
+            "override": {
+              "endpoint": "https://aiplatform.googleapis.com/v1/projects/{{VERTEX_PROJECT_ID}}/locations/global/endpoints/openapi/chat/completions"
+            }
+          }
+        ],
+        "balancer": {
+          "algorithm": "roundrobin"
+        }
+      }
+    },
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "://googleapis.com": 1
+      },
+      "scheme": "https"
+    }
+  }'
+
+
+
+###
+# PASSO 2: Testes
+curl http://localhost:9080/google/vertex-ai/chat/completions/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+       "messages": [
+         {"role": "user", "content": "Explique o que é Kubernetes em poucas palavras..."}
+       ]
+  }'
+
+###
+
+
+curl http://localhost:9080/google/vertex-ai/chat/completions-multimodel/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+       "messages": [
+         {"role": "user", "content": "Explique o que é Kubernetes em poucas palavras..."}
+       ]
+  }'
+
+###
+
+curl http://localhost:9080/google/vertex-ai/chat/completions/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY_2}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+       "messages": [
+         {"role": "user", "content": "Explique o que é Kubernetes em poucas palavras..."}
+       ]
+  }'
+
+###
+
+curl http://localhost:9080/google/vertex-ai/chat/completions/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "user", "content": "Fale resumidamente sobre Aws" }
+    ]
+  }'
+
+###
+
+curl http://localhost:9080/google/vertex-ai/chat/completions/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "user", "content": "Fale resumidamente sobre Amazon Web Services" }
+    ]
+  }'
+
+###
+
+
+curl http://localhost:9080/google/vertex-ai/chat/completions/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+       "messages": [
+         {"role": "user", "content": "Explique o que é Cloud Native em poucas palavras..."}
+       ]
+  }'
+
+###
+
+
+curl http://localhost:9080/google/vertex-ai/chat/completions-multimodel/ \
+  -X POST \
+  -H "apikey: {{CLIENT_API_KEY}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+       "messages": [
+         {"role": "user", "content": "Explique o que é DevOps em poucas palavras..."}
+       ]
+  }'
